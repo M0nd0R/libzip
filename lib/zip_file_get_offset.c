@@ -47,13 +47,29 @@
 zip_uint64_t _zip_file_get_offset(const zip_t *za, zip_uint64_t idx, zip_error_t *error) {
     zip_uint64_t offset;
     zip_int32_t size;
+    zip_uint8_t magic[4];
+    zip_dirent_t *de;
 
     if (za->entry[idx].orig == NULL) {
         zip_error_set(error, ZIP_ER_INTERNAL, 0);
         return 0;
     }
 
-    offset = za->entry[idx].orig->offset;
+    de = za->entry[idx].orig;
+    offset = de->offset;
+
+    if (zip_source_seek(za->src, (zip_int64_t)offset, SEEK_SET) < 0) {
+        zip_error_set_from_source(error, za->src);
+        return 0;
+    }
+
+    if (_zip_read(za->src, magic, 4, error) < 0) {
+        return 0;
+    }
+    if (memcmp(magic, LOCAL_MAGIC, 4) != 0) {
+        zip_error_set(error, ZIP_ER_INCONS, ZIP_ER_DETAIL_ENTRY_HEADER_MISMATCH);
+        return 0;
+    }
 
     if (zip_source_seek(za->src, (zip_int64_t)offset, SEEK_SET) < 0) {
         zip_error_set_from_source(error, za->src);
@@ -63,6 +79,28 @@ zip_uint64_t _zip_file_get_offset(const zip_t *za, zip_uint64_t idx, zip_error_t
     /* TODO: cache? */
     if ((size = _zip_dirent_size(za->src, ZIP_EF_LOCAL, error)) < 0) {
         return 0;
+    }
+
+    if (de->filename != NULL) {
+        zip_uint16_t local_name_len;
+        zip_uint8_t b[2];
+        zip_buffer_t *buffer;
+
+        /* After _zip_dirent_size the source sits past the local header.
+         * Re-seek to the filename length field (offset + 26). */
+        if (zip_source_seek(za->src, (zip_int64_t)offset + 26, SEEK_SET) < 0) {
+            zip_error_set_from_source(error, za->src);
+            return 0;
+        }
+        if ((buffer = _zip_buffer_new_from_source(za->src, 2, b, error)) == NULL) {
+            return 0;
+        }
+        local_name_len = _zip_buffer_get_16(buffer);
+        _zip_buffer_free(buffer);
+        if (local_name_len != _zip_string_length(de->filename)) {
+            zip_error_set(error, ZIP_ER_INCONS, ZIP_ER_DETAIL_ENTRY_HEADER_MISMATCH);
+            return 0;
+        }
     }
 
     if (offset + (zip_uint32_t)size > ZIP_INT64_MAX) {
