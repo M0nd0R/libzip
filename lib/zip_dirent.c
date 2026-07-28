@@ -578,18 +578,26 @@ zip_int64_t _zip_dirent_read(zip_dirent_t *zde, zip_source_t *src, zip_buffer_t 
         zde->comment = utf8_string;
     }
 
-    /* Zip64 */
-
-    if (zde->uncomp_size == ZIP_UINT32_MAX || zde->comp_size == ZIP_UINT32_MAX || zde->offset == ZIP_UINT32_MAX) {
+    /* Zip64: APPNOTE requires a Zip64 EF whenever a field uses the 0xFFFFFFFF
+     * sentinel. Accepting the sentinel without an EF leaves fake 4GiB sizes and
+     * selects the wrong data-descriptor width. */
+    if (zde->uncomp_size == ZIP_UINT32_MAX || zde->comp_size == ZIP_UINT32_MAX ||
+        zde->offset == ZIP_UINT32_MAX) {
         zip_uint16_t got_len;
-        const zip_uint8_t *ef = _zip_ef_get_by_id(zde->extra_fields, &got_len, ZIP_EF_ZIP64, 0, local ? ZIP_EF_LOCAL : ZIP_EF_CENTRAL, error);
-        if (ef != NULL) {
-            if (!zip_dirent_process_ef_zip64(zde, ef, got_len, local, error)) {
-                if (!from_buffer) {
-                    _zip_buffer_free(buffer);
-                }
-                return -1;
+        const zip_uint8_t *ef = _zip_ef_get_by_id(zde->extra_fields, &got_len, ZIP_EF_ZIP64, 0,
+            local ? ZIP_EF_LOCAL : ZIP_EF_CENTRAL, error);
+        if (ef == NULL) {
+            zip_error_set(error, ZIP_ER_INCONS, ZIP_ER_DETAIL_INVALID_ZIP64_EF);
+            if (!from_buffer) {
+                _zip_buffer_free(buffer);
             }
+            return -1;
+        }
+        if (!zip_dirent_process_ef_zip64(zde, ef, got_len, local, error)) {
+            if (!from_buffer) {
+                _zip_buffer_free(buffer);
+            }
+            return -1;
         }
         is_zip64 = true;
     }
@@ -1072,8 +1080,14 @@ int _zip_dirent_write(zip_t *za, zip_dirent_t *de, zip_flags_t flags) {
     _zip_buffer_put_16(buffer, _zip_string_length(de->filename));
     ef_total_size = _zip_ef_size(ef, ZIP_EF_BOTH);
     if (!ZIP_WANT_TORRENTZIP(za)) {
-        /* TODO: check for overflow */
-        ef_total_size += _zip_ef_size(de->extra_fields, flags);
+        zip_uint32_t add = _zip_ef_size(de->extra_fields, flags);
+        if (ef_total_size > ZIP_UINT32_MAX - add) {
+            zip_error_set(&za->error, ZIP_ER_EF_TOO_LARGE, 0);
+            _zip_buffer_free(buffer);
+            _zip_ef_free(ef);
+            return -1;
+        }
+        ef_total_size += add;
     }
     if (ef_total_size > ZIP_UINT16_MAX) {
         zip_error_set(&za->error, ZIP_ER_EF_TOO_LARGE, 0);
